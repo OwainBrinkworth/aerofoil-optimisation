@@ -12,6 +12,6 @@ def COMPUTE_CIRCULATION(a,b,x0,y0,numT,Vx,Vy,X,Y):
     fy    = interpolate.RectBivariateSpline(Y,X,Vy)                             # Interpolate Y velocities from grid to ellipse points
     VxC   = fx.ev(yC,xC)                                                        # X velocity component on ellipse
     VyC   = fy.ev(yC,xC)                                                        # Y velocity component on ellipse
-    Gamma = -(np.trapezoid(VxC,xC) + np.trapezoid(VyC,yC))                              # Compute integral using trapezoid rule
+    Gamma = -(np.trapz(VxC,xC) + np.trapz(VyC,yC))                              # Compute integral using trapezoid rule
     
     return Gamma, xC, yC, VxC, VyC
