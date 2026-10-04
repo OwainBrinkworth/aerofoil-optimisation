@@ -9,7 +9,7 @@ from src.panel_methods.source_panel_method.streamline_calcs import STREAMLINE_SP
 
 Vinf = 1                                                                        # Freestream velocity
 AoA  = 0                                                                        # Angle of attack [deg]
-numB = 9                                                                        # Number of boundary points (including endpoint)
+numB = 36                                                                        # Number of boundary points (including endpoint)
 tO   = (360/(numB-1))/2                                                         # Boundary point angle offset [deg]
 AoAR = AoA*(np.pi/180)                                                          # Convert AoA to radians [rad]
 

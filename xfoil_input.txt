@@ -1,0 +1,14 @@
+LOAD
+naca0012.dat
+MDES
+0.02
+0.12
+
+EXEC
+
+OPER
+alfa 5.0
+PWRT
+xfoil_output.txt
+
+QUIT
