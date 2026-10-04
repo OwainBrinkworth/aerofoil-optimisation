@@ -2,9 +2,9 @@ import time
 
 from run_xfoil import run_case, saveTimeDataGeneration
 from aerofoil_initialisation import generate_parsec_lhs, check_sample_exists, getAerofoilsAsDataframe
-from defaults import params
+from defaults import params, dryrun
 from paths import get_path
-from parsecairfoils import generate_foils, plot_airfoil
+from parsecairfoils import generate_foils, plot_all_generated_aerofoils
 from compile_results import extract_cl_values
 from random_forest_regressor import train_surrogate_model
 from multiprocessing import Pool, cpu_count
@@ -15,10 +15,10 @@ if __name__ == "__main__":
     def processAerofoils(test=False):
         n_samples = params['test']['n_samples'] if test else params['experiment']['n_samples']
         start_time = time.time()
-        results_df = generate_parsec_lhs(test)
-        invalid_aerofoils = generate_foils(test)
-        for i in range(n_samples):
-            plot_airfoil(i)
+        generate_parsec_lhs(test)
+        generate_foils(test)
+        results_df = getAerofoilsAsDataframe(test=test)
+        plot_all_generated_aerofoils(test=test, max_count=n_samples)
 
         # Use slightly fewer than max cores (keeps system stable)
         n_cores = max(1, cpu_count() - 1)
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     # Let's Go!
     sampling_exists = check_sample_exists(test=False)
     tests_exist = check_sample_exists(test=True)
-    if sampling_exists:
+    if sampling_exists and not dryrun:
         results_df = getAerofoilsAsDataframe(test=False)
         # Attempt to populate CL values from any existing solver output.
         results_df = extract_cl_values(results_df)

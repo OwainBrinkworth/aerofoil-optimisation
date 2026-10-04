@@ -17,163 +17,207 @@ import matplotlib.pyplot as plt
 
 import parseccoef as pc
 
-from defaults import params
+from defaults import params, param_bounds, replacement
 from paths import get_path
+
+
+def _sample_to_coords(sample):
+    """Convert a PARSEC parameter row into a coordinate array."""
+    rle = float(sample[0])
+
+    x_pre = float(sample[1])
+    y_pre = float(sample[2])
+    d2ydx2_pre = float(sample[3])
+    th_pre = float(sample[4])
+
+    x_suc = float(sample[5])
+    y_suc = float(sample[6])
+    d2ydx2_suc = float(sample[7])
+    th_suc = float(sample[8])
+
+    cf_pre = pc.pcoef(1.0, 0.0, rle, x_pre, y_pre, d2ydx2_pre, th_pre, 'pre')
+    cf_suc = pc.pcoef(1.0, 0.0, rle, x_suc, y_suc, d2ydx2_suc, th_suc, 'suc')
+    return ppoints(cf_pre, cf_suc, 241, xte=1.0)
+
+
+def _random_parsec_sample(rng=None):
+    """Draw a new PARSEC sample within the valid bounds."""
+    if rng is None:
+        rng = np.random.default_rng()
+    lower = np.array([bounds[0] for bounds in param_bounds.values()], dtype=float)
+    upper = np.array([bounds[1] for bounds in param_bounds.values()], dtype=float)
+    return rng.uniform(lower, upper)
+
+
+def _validation_reasons(details):
+    """Return a human-readable list of reasons why an aerofoil was rejected."""
+    if not isinstance(details, dict):
+        return ['invalid geometry']
+
+    reasons = []
+    if not np.isfinite(details.get('thickness', [])).all():
+        reasons.append('non-finite thickness profile')
+    if np.any(np.asarray(details.get('thickness', []), dtype=float) <= 0.0):
+        reasons.append('thickness <= 0 at some x')
+
+    t_max = float(details.get('t_max', 0.0))
+    x_t_max = float(details.get('x_t_max', 0.0))
+    if t_max < 0.04 or t_max > 0.25:
+        reasons.append(f'max thickness {t_max:.4f} outside [0.04, 0.25]')
+    if x_t_max < 0.1 or x_t_max > 0.6:
+        reasons.append(f'max thickness x-position {x_t_max:.4f} outside [0.10, 0.60]')
+
+    if not reasons:
+        reasons.append('failed geometry validity check')
+    return reasons
+
 
 def generate_foils(test=False, index=None):
     test_type = 'test' if test else 'experiment'
     n_samples = params[test_type]['n_samples']
-    type = params[test_type]['sampling_method']
+    type_name = params[test_type]['sampling_method']
     input_directory = get_path('pre', test=test)
     output_directory = get_path('aerofoils', test=test)
 
     full_path = os.path.join(output_directory)
     os.makedirs(full_path, exist_ok=True)
 
-    # Read parsec parameters (user input) & assign to array
-    pp = f'parsec_init_{type}_{n_samples}.csv'
+    pp = f'parsec_init_{type_name}_{n_samples}.csv'
     pparray = np.genfromtxt(
         os.path.join(input_directory, pp),
         delimiter=';',
         dtype=float,
-        skip_header=1
+        skip_header=1,
+        ndmin=2,
     )
 
-    # TE & LE of airfoil (normalized, chord = 1)
-    xle = 0.0
-    yle = 0.0
-    xte = 1.0
-    yte = 0.0
+    if index is not None:
+        if index < 0 or index >= len(pparray):
+            raise IndexError(f'Aerofoil index {index} is outside the {len(pparray)} samples in {pp}.')
+        sampled = pparray[index]
+        coords = _sample_to_coords(sampled)
+        return coords[:, 0], coords[:, 1], coords[:, 0], coords[:, 1]
 
-    # LE radius
-    aerofoils = [index] if index else range(len(pparray))
+    rng = np.random.default_rng() if replacement else None
+    max_replacement_attempts = max(50, n_samples * 100) if replacement else 1
+    csv_path = os.path.join(input_directory, pp)
+    with open(csv_path, 'r') as csv_file:
+        csv_header = csv_file.readline().strip()
 
-    invalid_aerofoils = []
-    for i in aerofoils:
-        rle = pparray[i,0]
+    for sample_index in range(n_samples):
+        candidate = pparray[sample_index].copy()
+        attempts = 0
+        final_coords = None
+        while attempts < max_replacement_attempts:
+            coords = _sample_to_coords(candidate)
+            valid, details = validate_aerofoil(coords, return_details=True)
+            reasons = _validation_reasons(details)
+            plot_airfoil(
+                sample_index,
+                coords=coords,
+                valid=valid,
+                validity_details=details,
+                attempt_number=attempts + 1,
+                rejection_reasons=reasons,
+            )
 
-        # Pressure (lower) surface parameters 
-        x_pre = pparray[i, 1]
-        y_pre = pparray[i, 2]
-        d2ydx2_pre = pparray[i, 3]
-        th_pre = pparray[i, 4]
+            if valid:
+                final_coords = coords
+                break
 
-        # Suction (upper) surface parameters
-        x_suc = pparray[i, 5]
-        y_suc = pparray[i, 6]
-        d2ydx2_suc = pparray[i, 7]
-        th_suc = pparray[i, 8]
-
-
-        # Evaluate pressure (lower) surface coefficients
-        cf_pre = pc.pcoef(xte,yte,rle,
-                        x_pre,y_pre,d2ydx2_pre,th_pre,
-                        'pre')
-
-        # Evaluate suction (upper) surface coefficients
-        cf_suc = pc.pcoef(xte,yte,rle,
-                        x_suc,y_suc,d2ydx2_suc,th_suc,
-                        'suc')
-
-
-        # Evaluate pressure (lower) surface points
-        xx_pre = np.linspace(xte,xle,101)
-        yy_pre = (cf_pre[0]*xx_pre**(1/2) + 
-                cf_pre[1]*xx_pre**(3/2) + 
-                cf_pre[2]*xx_pre**(5/2) + 
-                cf_pre[3]*xx_pre**(7/2) + 
-                cf_pre[4]*xx_pre**(9/2) + 
-                cf_pre[5]*xx_pre**(11/2)
-                ) 
-
-        # Evaluate suction (upper) surface points
-        xx_suc = np.linspace(xle,xte,101)
-        yy_suc = (cf_suc[0]*xx_suc**(1/2) + 
-                cf_suc[1]*xx_suc**(3/2) + 
-                cf_suc[2]*xx_suc**(5/2) + 
-                cf_suc[3]*xx_suc**(7/2) + 
-                cf_suc[4]*xx_suc**(9/2) + 
-                cf_suc[5]*xx_suc**(11/2)
-                )
-        
-        # Return surfaces for plotting
-        if index:
-               return xx_suc, yy_suc, xx_pre, yy_pre
-
-        # Use parsecexport to save coordinate file
-        fpath = os.path.join(full_path, f'parsec_airfoil_{i}.dat')
-        # with ... as ... only opens the file for the block it executes, then closes it
-        plain_coords = ppointsplain(i, cf_pre, cf_suc, 241, xte=xte)
-        if plain_coords:
-            with open(fpath, 'w') as f:
-                    f.write(plain_coords)
+            print(f"Invalid aerofoil for sample {sample_index}, attempt {attempts + 1}: {', '.join(reasons)}")
+            attempts += 1
+            if replacement:
+                candidate = _random_parsec_sample(rng)
+            else:
+                final_coords = coords
+                break
         else:
-             invalid_aerofoils.append(i)
-    return invalid_aerofoils
+            raise RuntimeError(f"Unable to generate a valid replacement for sample {sample_index} after {max_replacement_attempts} attempts.")
+
+        if final_coords is None:
+            raise RuntimeError(f"No generated aerofoil for sample {sample_index}.")
+
+        if replacement and attempts > 0:
+            pparray[sample_index] = candidate
+            np.savetxt(
+                csv_path,
+                pparray,
+                delimiter=';',
+                fmt='%.17g',
+                header=csv_header,
+                comments='',
+            )
+
+        fpath = os.path.join(full_path, f'parsec_airfoil_{sample_index}.dat')
+        plain_coords = '\n'.join(f"{coord[0]:.6f} {coord[1]:.6f}" for coord in final_coords)
+        with open(fpath, 'w') as f:
+            f.write(plain_coords)
+
+    return []
+
+
+def coords_to_string(coords, index, valid=True, attempt_number=None):
+    """Return a plain coordinate text block and save a validation plot for the geometry."""
+    valid, details = validate_aerofoil(coords, return_details=True)
+    reasons = _validation_reasons(details)
+    plot_airfoil(
+        index,
+        coords=coords,
+        valid=valid,
+        validity_details=details,
+        attempt_number=attempt_number,
+        rejection_reasons=reasons,
+    )
+    if not valid:
+        return ''
+    return '\n'.join(f"{coord[0]:.6f} {coord[1]:.6f}" for coord in coords)
+
 
 def plot_foils(aerofoil_indices):
-        n_samples = params['sample']['n_samples']
-        type = params['sample']['sampling_method']
-        input_directory = get_path('pre_experiment')
-        pp = f'parsec_init_{type}_{n_samples}.csv'
+    n_samples = params['sample']['n_samples']
+    type_name = params['sample']['sampling_method']
+    input_directory = get_path('pre_experiment')
+    pp = f'parsec_init_{type_name}_{n_samples}.csv'
 
-        for aerofoil_index in aerofoil_indices:
-                xx_suc, yy_suc, xx_pre, yy_pre = generate_foils(index=aerofoil_index)
-                # Plot airfoil contour
-                plt.figure()
+    for aerofoil_index in aerofoil_indices:
+        xx_suc, yy_suc, xx_pre, yy_pre = generate_foils(index=aerofoil_index)
+        plt.figure()
 
-                plt.plot(xx_suc,yy_suc,'r',
-                        xx_pre,yy_pre,'b', linewidth=2)
+        plt.plot(xx_suc, yy_suc, 'r', xx_pre, yy_pre, 'b', linewidth=2)
 
-                plt.grid(True)
-                plt.xlim([0,1])
-                #plt.yticks([])
-                plt.xticks(np.arange(0,1.1,0.1))
-                plt.gca().axis('equal')
+        plt.grid(True)
+        plt.xlim([0, 1])
+        plt.xticks(np.arange(0, 1.1, 0.1))
+        plt.gca().axis('equal')
 
-                # Some magic with strings
-                with open(os.path.join(input_directory, pp), 'r') as f:
-                        lines = f.readlines()
+        with open(os.path.join(input_directory, pp), 'r') as f:
+            lines = f.readlines()
 
-                # First line = headers
-                parnames = lines[0].strip().split(';')
+        parnames = lines[0].strip().split(';')
+        parvals = lines[aerofoil_index + 1].strip().split(';')
 
-                # Data starts from line 1 → so offset by +1
-                parvals = lines[aerofoil_index + 1].strip().split(';')
+        parnv = [f"{n}={float(v):.3f}" for n, v in zip(parnames, parvals)]
+        parnv = [', '.join(parnv[:5]), ', '.join(parnv[5:])]
 
-                parnv = [f"{n}={float(v):.3f}" for n, v in zip(parnames, parvals)]
-                parnv = [', '.join(parnv[:5]), ', '.join(parnv[5:])]
+        plt.title("PARSEC airfoil with parameters:\n{}\n{}".format(parnv[0], parnv[1]))
+        plt.tight_layout()
+        plt.savefig(os.path.join(input_directory, f'parsec_airfoil_{type_name}_{n_samples}_{aerofoil_index}.png'))
 
-                plt.title("PARSEC airfoil with parameters:\n{}\n{}"
-                        .format(parnv[0], parnv[1]))
-                # Make room for title automatically
-                plt.tight_layout()
 
-                plt.savefig(os.path.join(input_directory, f'parsec_airfoil_{type}_{n_samples}_{aerofoil_index}.png'))
-
-def plot_airfoil(index, coords=np.array([]), valid=True):
+def plot_airfoil(index, coords=np.array([]), valid=True, validity_details=None, attempt_number=None, rejection_reasons=None):
     """
-    Plot an airfoil from a .dat file and save the figure.
-
-    Parameters:
-        dat_path (str): path to .dat file
-        save_dir (str): directory to save plot
-        filename (str): output image filename
+    Plot an airfoil outline and its thickness distribution, then save a single figure.
+    The figure is annotated with the validity result, rejection reason, and attempt count.
     """
-
-    # --- Read coordinates ---
     n_samples = params['experiment']['n_samples']
-    type = params['experiment']['sampling_method']
-    if coords.any():
-        x = coords[:, 0]
-        y = coords[:, 1]
-    else:
-        input_directory = get_path('aerofoils')
-        pp = f'parsec_airfoil_{index}.dat'
-        x, y = [], []
-        dat_path = os.path.join(input_directory, pp)
+    type_name = params['experiment']['sampling_method']
 
-        with open(dat_path, "r") as f:
+    if coords.size == 0:
+        input_directory = get_path('aerofoils')
+        dat_path = os.path.join(input_directory, f'parsec_airfoil_{index}.dat')
+        x, y = [], []
+        with open(dat_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) == 2:
@@ -181,83 +225,155 @@ def plot_airfoil(index, coords=np.array([]), valid=True):
                         xi, yi = float(parts[0]), float(parts[1])
                         x.append(xi)
                         y.append(yi)
-                    except:
-                        continue  # skip invalid lines
+                    except Exception:
+                        continue
+        coords = np.array(list(zip(x, y))) if x else np.empty((0, 2))
 
-    # --- Plot ---
-    plt.figure()
-    plt.plot(x, y)
-    plt.gca().set_aspect('equal', adjustable='box')
+    x = coords[:, 0]
+    y = coords[:, 1]
 
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.title("Airfoil geometry")
+    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
 
-    # --- Ensure save directory exists ---
+    axes[0].plot(x, y, color='tab:blue', linewidth=2)
+    label = f'Sample {index}'
+    if attempt_number is not None:
+        label += f', attempt {attempt_number}'
+    label += f' ({"VALID" if valid else "INVALID"})'
+    axes[0].set_title(label)
+    axes[0].set_ylabel('y')
+    axes[0].set_aspect('equal', adjustable='box')
+    axes[0].grid(True, alpha=0.3)
+
+    if validity_details is None:
+        validity_details = validate_aerofoil(coords, return_details=True)[1]
+
+    x_common = validity_details.get('x_common', np.linspace(0.0, 1.0, 500))
+    thickness = validity_details.get('thickness', np.zeros_like(x_common))
+    axes[1].plot(x_common, thickness, color='tab:orange', linewidth=2, label='Thickness')
+    axes[1].axhline(0.04, color='tab:red', linestyle='--', linewidth=1, alpha=0.8)
+    axes[1].axhline(0.25, color='tab:red', linestyle='--', linewidth=1, alpha=0.8)
+    axes[1].axvline(0.10, color='tab:gray', linestyle='--', linewidth=1, alpha=0.8)
+    axes[1].axvline(0.60, color='tab:gray', linestyle='--', linewidth=1, alpha=0.8)
+    axes[1].set_xlabel('x/c')
+    axes[1].set_ylabel('t/c')
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_title('Thickness profile')
+
+    if rejection_reasons is None:
+        rejection_reasons = _validation_reasons(validity_details)
+    reason_text = '\n'.join(rejection_reasons)
+    fig.text(0.02, 0.98, f"Reason: {reason_text}", va='top', ha='left', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+
+    status_text = 'VALID' if valid else 'INVALID'
+    fig.suptitle(f'Geometry check: {status_text}', y=0.98)
+
     save_dir = get_path('aerofoils')
     os.makedirs(save_dir, exist_ok=True)
-
-    save_path = os.path.join(save_dir, f'parsec_airfoil_{type}_{n_samples}_{index}_dat_valid_{valid}.png')
-
-    # --- Save ---
-    plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.close()
+    attempt_suffix = f'_attempt_{attempt_number}' if attempt_number is not None else ''
+    save_path = os.path.join(save_dir, f'parsec_airfoil_{type_name}_{n_samples}_{index}{attempt_suffix}_valid_{valid}.png')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
     print(f"Airfoil plot saved to: {save_path}")
 
+
+def plot_all_generated_aerofoils(test=False, max_count=None):
+    """Plot every saved aerofoil with its actual validity status from the current validation rule."""
+    test_type = 'test' if test else 'experiment'
+    n_samples = params[test_type]['n_samples']
+    aerofoil_dir = get_path('aerofoils', test=test)
+    os.makedirs(aerofoil_dir, exist_ok=True)
+    count = min(n_samples, max_count) if max_count is not None else n_samples
+
+    for index in range(count):
+        dat_path = os.path.join(aerofoil_dir, f'parsec_airfoil_{index}.dat')
+        if not os.path.exists(dat_path):
+            print(f"Skipping plot for missing file: {dat_path}")
+            continue
+
+        x, y = [], []
+        with open(dat_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    try:
+                        xi, yi = float(parts[0]), float(parts[1])
+                        x.append(xi)
+                        y.append(yi)
+                    except Exception:
+                        continue
+
+        if len(x) < 3:
+            print(f"Skipping file with insufficient geometry data: {dat_path}")
+            continue
+
+        coords = np.array(list(zip(x, y)))
+        valid, details = validate_aerofoil(coords, return_details=True)
+        plot_airfoil(index, coords=coords, valid=valid, validity_details=details)
+
+    return count
+
+
 def ppointsplain(index, *args, **kwargs):
-    '''Alias for ppoints that returns a string with plain data format'''
+    '''Alias for ppoints that returns a string with plain data format.'''
     coords = ppoints(*args, **kwargs)
-
-    # Check the aerofoils
-    if validate_aerofoil(coords):
-        # Iterate over coordinates, making a list of strings
-        coordstrlist = ["{:.6f} {:.6f}".format(coord[0], coord[1])
-                        for coord in coords]
-        plot_airfoil(index, coords=coords, valid=True)
-        # Now join these strings with linebreaks in between
+    valid, details = validate_aerofoil(coords, return_details=True)
+    plot_airfoil(index, coords=coords, valid=valid, validity_details=details)
+    if valid:
+        coordstrlist = ["{:.6f} {:.6f}".format(coord[0], coord[1]) for coord in coords]
         return '\n'.join(coordstrlist)
-    else:
-        plot_airfoil(index, coords=coords, valid=False)
-        return ''
+    return ''
 
-def validate_aerofoil(coord):
+
+def validate_aerofoil(coord, return_details=False):
+    if coord is None or len(coord) < 3:
+        details = {'valid': False, 'thickness': np.array([]), 'x_common': np.array([]), 't_max': 0.0, 'x_t_max': 0.0}
+        return (False, details) if return_details else False
+
+    coord = np.asarray(coord, dtype=float)
     x = coord[:, 0]
     y = coord[:, 1]
-    le_idx = np.argmin(x)
 
-    upper = coord[:le_idx+1]
-    lower = coord[le_idx:]
+    if np.any(~np.isfinite(x)) or np.any(~np.isfinite(y)):
+        details = {'valid': False, 'thickness': np.array([]), 'x_common': np.array([]), 't_max': 0.0, 'x_t_max': 0.0}
+        return (False, details) if return_details else False
+
+    le_idx = np.argmin(np.abs(x))
+    lower = coord[:le_idx + 1]
+    upper = coord[le_idx:]
     upper = upper[np.argsort(upper[:, 0])]
     lower = lower[np.argsort(lower[:, 0])]
 
     x_common = np.linspace(0.0, 1.0, 500)
-
-    upper_interp = interp1d(upper[:, 0], upper[:, 1], bounds_error=False, fill_value='extrapolate')
-    lower_interp = interp1d(lower[:, 0], lower[:, 1], bounds_error=False, fill_value='extrapolate')
+    upper_interp = interp1d(upper[:, 0], upper[:, 1], bounds_error=False, fill_value=np.nan)
+    lower_interp = interp1d(lower[:, 0], lower[:, 1], bounds_error=False, fill_value=np.nan)
 
     y_upper = upper_interp(x_common)
     y_lower = lower_interp(x_common)
-
     thickness = y_upper - y_lower
 
-    t_max_idx = np.argmax(thickness)
-    t_max = thickness[t_max_idx]
-    x_t_max = x_common[t_max_idx]
+    thickness = np.asarray(thickness, dtype=float)
+    valid = True
+    t_max_idx = int(np.nanargmax(thickness)) if thickness.size else -1
+    t_max = float(thickness[t_max_idx]) if thickness.size else 0.0
+    x_t_max = float(x_common[t_max_idx]) if thickness.size else 0.0
 
-    # Check crossing
-    if np.any(thickness <= 0.00):
-        return False
-
-    # Check maximum thickness bounds
+    if np.any(~np.isfinite(thickness)) or np.any(thickness < -0.001):
+        valid = False
     if t_max < 0.04 or t_max > 0.25:
-        return False
-
-    # Check maximum thickness location
+        valid = False
     if x_t_max < 0.1 or x_t_max > 0.6:
-        return False
+        valid = False
 
-    return True
+    details = {
+        'valid': valid,
+        'thickness': thickness,
+        'x_common': x_common,
+        't_max': t_max,
+        'x_t_max': x_t_max,
+    }
+    return (valid, details) if return_details else valid
 
 
 def ppoints(cf_pre, cf_suc, npts=121, xte=1.0):
@@ -267,30 +383,19 @@ def ppoints(cf_pre, cf_suc, npts=121, xte=1.0):
     Assumes trailing edge x position is 1.0 if not specified.
     Returns 121 points if 'npts' keyword argument not specified.
     '''
-    # Using cosine spacing to concentrate points near TE and LE,
-    # see http://airfoiltools.com/airfoil/naca4digit
-    xpts = (1 - np.cos(np.linspace(0, 1, int(np.ceil(npts/2)))*np.pi)) / 2
-    # Take TE x-position into account
+    xpts = (1 - np.cos(np.linspace(0, 1, int(np.ceil(npts/2))) * np.pi)) / 2
     xpts *= xte
 
-    # Powers to raise coefficients to
     pwrs = (1/2, 3/2, 5/2, 7/2, 9/2, 11/2)
-    # Make [[1,1,1,1],[2,2,2,2],...] style array
     xptsgrid = np.meshgrid(np.arange(len(pwrs)), xpts)[1]
-    # Evaluate points with concise matrix calculations. One x-coordinate is
-    # evaluated for every row in xptsgrid
-    evalpts = lambda cf: np.sum(cf*xptsgrid**pwrs, axis=1)
-    # Move into proper order: start at TE, over bottom, then top
-    # Avoid leading edge pt (0,0) being included twice by slicing [1:]
+    evalpts = lambda cf: np.sum(cf * xptsgrid**pwrs, axis=1)
     ycoords = np.append(evalpts(cf_pre)[::-1], evalpts(cf_suc)[1:])
     xcoords = np.append(xpts[::-1], xpts[1:])
-    # Return 2D list of coordinates [[x,y],[x,y],...] by transposing .T
     return np.array((xcoords, ycoords)).T
 
 
 def _example():
     '''Runs some examples. Underscore means it's a local function.'''
-    # Sample coefficients
     rle = .01
     x_pre = .45
     y_pre = -0.006
@@ -301,29 +406,18 @@ def _example():
     d2ydx2_suc = -.35
     th_suc = -10
 
-    # Trailing edge x and y position
-    xte = .9
-    yte = -0.05
+    xte = 1.0
+    yte = 0.0
 
-    # Evaluate pressure (lower) surface coefficients
     cf_pre = pc.pcoef(xte, yte, rle,
                       x_pre, y_pre, d2ydx2_pre, th_pre,
                       'pre')
-    # Evaluate suction (upper) surface coefficients
     cf_suc = pc.pcoef(xte, yte, rle,
                       x_suc, y_suc, d2ydx2_suc, th_suc,
                       'suc')
 
-    # Get and print plain list of coordinates
-    print(ppointsplain(cf_pre, cf_suc, 121, xte=xte))
-    # Get list of coordinates
     pts = ppoints(cf_pre, cf_suc, 121, xte=xte)
-    # Plot this airfoil, transposing pts to get list of x's and list of y's
-    import matplotlib.pyplot as plt
-    plt.plot(pts.T[0], pts.T[1], 'o--')
-    plt.gca().axis('equal')
-    plt.show()
 
-# If this file is run, execute example
+
 if __name__ == "__main__":
     _example()
