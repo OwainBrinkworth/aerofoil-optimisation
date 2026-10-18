@@ -1,0 +1,9 @@
+NACA 0012
+OPER
+v
+1e5
+alfa 10
+PWRT
+/Users/owainbrinkworth/Downloads/Xfoil/results/xfoil_output.txt
+
+QUIT
