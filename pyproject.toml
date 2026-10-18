@@ -1,0 +1,27 @@
+[project]
+name = "aerofoil-optimisation"
+version = "0.1.0"
+description = "Aerofoil optimisation using panel methods and surrogate models"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "scipy",
+    "scikit-learn",
+    "xgboost",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+
+[project.optional-dependencies]
+dev = [
+    "flake8>=7.1.0",
+    "pylint>=3",
+    "bandit>=1,<2",
+]
