@@ -394,30 +394,356 @@ def ppoints(cf_pre, cf_suc, npts=121, xte=1.0):
     return np.array((xcoords, ycoords)).T
 
 
-def _example():
-    '''Runs some examples. Underscore means it's a local function.'''
-    rle = .01
-    x_pre = .45
-    y_pre = -0.006
-    d2ydx2_pre = -.2
-    th_pre = 2
-    x_suc = .35
-    y_suc = .055
-    d2ydx2_suc = -.35
-    th_suc = -10
+def _example(
+    R_LE=0.01,
+    x_PRE=0.45,
+    y_PRE=0.060,
+    d2ydx2_PRE=-0.2,
+    th_PRE=2.0,
+    x_SUC=0.35,
+    y_SUC=0.025,
+    d2ydx2_SUC=-0.35,
+    th_SUC=-10.0,
+    xte=1.0,
+    yte=0.0,
+    npts=241,
+):
 
-    xte = 1.0
-    yte = 0.0
+    cf_pre = pc.pcoef(
+        xte,
+        yte,
+        R_LE,
+        x_PRE,
+        y_PRE,
+        d2ydx2_PRE,
+        th_PRE,
+        'pre'
+    )
 
-    cf_pre = pc.pcoef(xte, yte, rle,
-                      x_pre, y_pre, d2ydx2_pre, th_pre,
-                      'pre')
-    cf_suc = pc.pcoef(xte, yte, rle,
-                      x_suc, y_suc, d2ydx2_suc, th_suc,
-                      'suc')
+    cf_suc = pc.pcoef(
+        xte,
+        yte,
+        R_LE,
+        x_SUC,
+        y_SUC,
+        d2ydx2_SUC,
+        th_SUC,
+        'suc'
+    )
 
-    pts = ppoints(cf_pre, cf_suc, 121, xte=xte)
+    coords = ppoints(
+        cf_pre,
+        cf_suc,
+        npts,
+        xte=xte
+    )
+
+    valid, details = validate_aerofoil(
+        coords,
+        return_details=True
+    )
+
+    x = coords[:, 0]
+    y = coords[:, 1]
+
+    x_common = details['x_common']
+    thickness = details['thickness']
+
+    # ==========================================================
+    # Thickness derivatives
+    # ==========================================================
+
+    dt_dx = np.gradient(thickness, x_common)
+    d2t_dx2 = np.gradient(dt_dx, x_common)
+
+    zero_crossings = []
+    for i in range(len(dt_dx) - 1):
+        if dt_dx[i] == 0:
+            zero_crossings.append(x_common[i])
+        elif  dt_dx[i] * dt_dx[i+1] < 0:
+            zero_crossings.append(x_common[i])
+
+    i_max_thickness = np.argmax(thickness)
+    max_thickness_x = x_common[i_max_thickness]
+    max_thickness_y = thickness[i_max_thickness]
+
+
+    # ==========================================================
+    # Split upper/lower surfaces
+    # ==========================================================
+
+    ile = np.argmin(coords[:, 0])
+
+    upper = coords[:ile + 1]
+    lower = coords[ile:]
+
+    # sort LE -> TE
+    upper = upper[np.argsort(upper[:, 0])]
+    lower = lower[np.argsort(lower[:, 0])]
+
+    x_grad = np.linspace(0.001, 1.0, 500)
+
+    y_upper = np.interp(
+        x_grad,
+        upper[:, 0],
+        upper[:, 1]
+    )
+
+    y_lower = np.interp(
+        x_grad,
+        lower[:, 0],
+        lower[:, 1]
+    )
+
+    # ==========================================================
+    # Surface gradients
+    # ==========================================================
+
+    dyu_dx = np.gradient(
+        y_upper,
+        x_grad
+    )
+
+    dyl_dx = np.gradient(
+        y_lower,
+        x_grad
+    )
+
+    grad_limit = 2.0
+
+    dyu_dx_plot = np.clip(
+        dyu_dx,
+        -grad_limit,
+        grad_limit
+    )
+
+    dyl_dx_plot = np.clip(
+        dyl_dx,
+        -grad_limit,
+        grad_limit
+    )
+    
+
+
+    # ==========================================================
+    # Plotting
+    # ==========================================================
+
+    fig, axes = plt.subplots(
+        4,
+        1,
+        figsize=(20, 14),
+        sharex=True,
+        gridspec_kw={
+            'height_ratios': [2, 1, 1, 1]
+        }
+    )
+
+    # ==========================================================
+    # Airfoil contour
+    # ==========================================================
+
+    axes[0].plot(
+        x,
+        y,
+        linewidth=2
+    )
+
+    axes[0].axhline(
+        0.0,
+        color='black',
+        linewidth=0.8,
+        alpha=0.5
+    )
+
+    axes[0].set_ylabel('y/c')
+
+    axes[0].set_title(
+        f'Aerofoil surface | Invalid for crossing surfaces'
+    )
+
+    axes[0].grid(
+        True,
+        alpha=0.3
+    )
+
+    axes[0].set_xlim(
+        0.0,
+        1.0
+    )
+    axes[0].set_ylim(
+        -0.1,
+        0.2
+    )
+
+    # ==========================================================
+    # Thickness distribution
+    # ==========================================================
+    axes[1].set_title(
+        'Thickness distribution'
+    )
+    axes[1].plot(
+        x_common,
+        thickness,
+        linewidth=2,
+        color='orange'
+    )
+
+    axes[1].axhline(
+        0.25,
+        color='black',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=1.0
+    )
+    axes[1].axhline(
+        0.04,
+        color='black',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=1.0
+    )
+
+    axes[1].axvline(
+        0.1,
+        color='red',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=0.5
+    )
+
+    axes[1].axvline(
+        0.6,
+        color='red',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=0.5
+    )
+
+    axes[1].set_ylabel('t/c')
+    axes[1].set_ylim(
+        -0.1,
+        0.3
+    )
+    axes[1].plot(max_thickness_x, max_thickness_y, 'x', color='orange', markersize=8, markeredgewidth=3)
+    axes[1].annotate(f'{max_thickness_x:.2f}c', (max_thickness_x, max_thickness_y), xytext=(5,8), textcoords='offset points')
+
+    # ==========================================================
+    # Thickness gradient
+    # ==========================================================
+    axes[2].set_title(
+        'Gradient of thickness'
+    )
+    axes[2].plot(
+        x_common,
+        dt_dx,
+        linewidth=2,
+        color='green'
+    )
+
+    axes[2].axhline(
+        0.0,
+        color='black',
+        linestyle='--',
+        linewidth=0.8
+    )
+
+    axes[2].set_ylabel('dt/dx')
+    axes[2].set_ylim(
+        -grad_limit,
+        grad_limit
+    )
+    for xc in zero_crossings:
+        axes[2].plot(xc, 0, 'gx', markersize=8, markeredgewidth=3)
+        axes[2].annotate(f'{xc:.2f}c', (xc, 0), xytext=(5,8), textcoords='offset points')
+
+
+    # ==========================================================
+    # Surface gradients
+    # ==========================================================
+    axes[3].set_title(
+        'Upper and lower surface gradients'
+    )
+    axes[3].plot(
+        x_grad,
+        dyu_dx_plot,
+        label='Upper surface',
+        linewidth=2,
+        color='purple'
+    )
+
+    axes[3].plot(
+        x_grad,
+        dyl_dx_plot,
+        label='Lower surface',
+        linewidth=2,
+        color='black'
+    )
+
+    axes[3].axhline(
+        -0.5,
+        color='black',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=1.0
+    )
+    axes[3].axhline(
+        0.5,
+        color='black',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=1.0
+    )
+
+    axes[3].axvline(
+        0.2,
+        color='red',
+        linestyle='--',
+        linewidth=0.8,
+        alpha=0.5
+    )
+
+    axes[3].set_ylim(
+        -grad_limit,
+        grad_limit
+    )
+
+    axes[3].set_ylabel('dy/dx')
+    axes[3].set_xlabel('x/c')
+
+    axes[3].legend()
+
+    # ==========================================================
+    # Layout
+    # ==========================================================
+
+    fig.tight_layout(rect=[0.01,0.02,0.99,0.99])
+
+    plt.show()
+
+    return coords, details
 
 
 if __name__ == "__main__":
+    interrogation_aerofoil = 9
+    input_directory = get_path('pre', test=False)
+    test_type = 'experiment'
+    n_samples = params[test_type]['n_samples']
+    type_name = params[test_type]['sampling_method']
+    pp = f'parsec_init_{type_name}_{n_samples}.csv'
+    pparray = np.genfromtxt(
+        os.path.join(input_directory, pp),
+        delimiter=';',
+        dtype=float,
+        skip_header=1,
+        ndmin=2,
+    )
+    aerofoil_params = {}
+    for parameter, value in zip(param_bounds.keys(), pparray[interrogation_aerofoil]):
+        if parameter == 'd2y/dx2_PRE':
+            parameter = 'd2ydx2_PRE'
+        if parameter == 'd2y/dx2_SUC':
+            parameter = 'd2ydx2_SUC'
+        aerofoil_params[parameter] = float(value)
+    # _example(**aerofoil_params)
     _example()

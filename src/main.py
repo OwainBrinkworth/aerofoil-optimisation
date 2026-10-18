@@ -21,22 +21,25 @@ if __name__ == "__main__":
         plot_all_generated_aerofoils(test=test, max_count=n_samples)
 
         # Use slightly fewer than max cores (keeps system stable)
-        n_cores = max(1, cpu_count() - 1)
+        # n_cores = max(1, cpu_count() - 1)
 
         # Compute paths here and pass into worker to avoid multiprocessing 'spawn' import issues
         aerofoil_dir = get_path('aerofoils', test=test)
         results_solver_dir = get_path('results_solver', test=test)
 
-        run_case_with_flag = partial(
-            run_case,
-            test=test,
-            params=params,
-            aerofoil_dir=aerofoil_dir,
-            results_solver_dir=results_solver_dir,
-        )
+        # run_case_with_flag = partial(
+        #     run_case,
+        #     test=test,
+        #     params=params,
+        #     aerofoil_dir=aerofoil_dir,
+        #     results_solver_dir=results_solver_dir,
+        # )
 
-        with Pool(n_cores) as pool:
-            results = pool.map(run_case_with_flag, range(n_samples))
+        # with Pool(n_cores) as pool:
+        #     results = pool.map(run_case_with_flag, range(n_samples))
+
+        for i in range(n_samples):
+            run_case(i, params=params, test=test, aerofoil_dir=aerofoil_dir, results_solver_dir=results_solver_dir)
         end_time = time.time()
         saveTimeDataGeneration(end_time-start_time, test=test)
         return results_df

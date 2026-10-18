@@ -90,8 +90,8 @@ def run_xfoil(airfoil_file, params, test=False):
     if err:
         print(err)
 
-    # print("XFOIL output:")
-    # print(out)
+    print("XFOIL output:")
+    print(out)
     if err:
         print("XFOIL error output:")
         print(err)

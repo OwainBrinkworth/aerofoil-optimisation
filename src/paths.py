@@ -2,7 +2,7 @@ import os
 
 from defaults import params, dryrun
 
-def get_path(key=None, test=False):
+def get_path(key=None, test=False, description=''):
     """
     Returns structured project paths based on a keyword.
 
@@ -75,6 +75,13 @@ def get_path(key=None, test=False):
                 f"{Re}_{aoa_str}",
             ),
 
+            "results_validation": os.path.join(
+                base_path,
+                "03_Results",
+                "Validation",
+                description,
+            ),
+
             "models": os.path.join(base_path, "04_Models"),
 
             "analysis": os.path.join(
@@ -136,6 +143,13 @@ def get_path(key=None, test=False):
                 f"{Re}_{aoa_str}",
             ),
 
+            "results_validation": os.path.join(
+                base_path,
+                "03_Results",
+                "Validation",
+                description,
+            ),
+
             "models": os.path.join(base_path, "04_Models"),
 
             "analysis": os.path.join(
@@ -183,6 +197,13 @@ def get_path(key=None, test=False):
                 "Experiments",
                 f"{sampling_method}_{n_samples}",
                 f"{Re}_{aoa_str}",
+            ),
+
+            "results_validation": os.path.join(
+                base_path,
+                "03_Results",
+                "Validation",
+                description,
             ),
 
             "models": os.path.join(base_path, "04_Models"),
