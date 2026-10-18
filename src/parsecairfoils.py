@@ -51,21 +51,20 @@ def _random_parsec_sample(rng=None):
 
 def _validation_reasons(details):
     """Return a human-readable list of reasons why an aerofoil was rejected."""
-    if not isinstance(details, dict):
-        return ['invalid geometry']
+    if not isinstance(details, dict) or details.get('x_common', np.array([])).size == 0:
+        return ['invalid or degenerate geometry']
 
     reasons = []
-    if not np.isfinite(details.get('thickness', [])).all():
-        reasons.append('non-finite thickness profile')
-    if np.any(np.asarray(details.get('thickness', []), dtype=float) <= 0.0):
-        reasons.append('thickness <= 0 at some x')
-
-    t_max = float(details.get('t_max', 0.0))
-    x_t_max = float(details.get('x_t_max', 0.0))
-    if t_max < 0.04 or t_max > 0.25:
-        reasons.append(f'max thickness {t_max:.4f} outside [0.04, 0.25]')
-    if x_t_max < 0.1 or x_t_max > 0.6:
-        reasons.append(f'max thickness x-position {x_t_max:.4f} outside [0.10, 0.60]')
+    if not details.get('no_intersection', False):
+        reasons.append('pressure and suction surfaces intersect (thickness < 0 somewhere)')
+    if not details.get('thickness_in_range', False):
+        reasons.append(f"max thickness {details.get('t_max', 0.0):.4f} outside [0.04, 0.25]")
+    if not details.get('single_maximum', False):
+        n_turning_points = details.get('n_thickness_turning_points', 0)
+        reasons.append(f"thickness distribution has {n_turning_points} turning point(s), expected exactly 1")
+    if not details.get('gradients_ok', False):
+        max_gradient = details.get('max_gradient_aft', 0.0)
+        reasons.append(f"surface gradient {max_gradient:.3f} exceeds 0.5 aft of x/c=0.2")
 
     if not reasons:
         reasons.append('failed geometry validity check')
@@ -205,8 +204,6 @@ def plot_airfoil(index, coords=np.array([]), valid=True, validity_details=None, 
     axes[1].plot(x_common, thickness, color='tab:orange', linewidth=2, label='Thickness')
     axes[1].axhline(0.04, color='tab:red', linestyle='--', linewidth=1, alpha=0.8)
     axes[1].axhline(0.25, color='tab:red', linestyle='--', linewidth=1, alpha=0.8)
-    axes[1].axvline(0.10, color='tab:gray', linestyle='--', linewidth=1, alpha=0.8)
-    axes[1].axvline(0.60, color='tab:gray', linestyle='--', linewidth=1, alpha=0.8)
     axes[1].set_xlabel('x/c')
     axes[1].set_ylabel('t/c')
     axes[1].grid(True, alpha=0.3)
@@ -269,44 +266,88 @@ def plot_all_generated_aerofoils(test=False, max_count=None):
 
 
 def validate_aerofoil(coord, return_details=False):
+    """
+    Check whether an aerofoil shape is physically sensible.
+
+    Four criteria are checked:
+        1. No intersection of the pressure/suction surfaces: t(x) >= 0
+           for all x in [0, 1], where t(x) is the thickness distribution.
+        2. Maximum thickness is between 4% and 25% of the chord:
+           0.04 <= max(t(x)) <= 0.25.
+        3. The thickness distribution has a single maximum: dt/dx = 0 has
+           exactly one solution for x in (0, 1).
+        4. The upper/lower surface gradients are not too steep aft of
+           x/c = 0.2: max(|dy/dx|) <= 0.5 for x in [0.2, 1].
+    """
+    empty_details = {
+        'valid': False, 'thickness': np.array([]), 'x_common': np.array([]),
+        't_max': 0.0, 'x_t_max': 0.0, 'dt_dx': np.array([]),
+        'n_thickness_turning_points': 0, 'thickness_turning_points': [],
+        'x_grad': np.array([]), 'dyu_dx': np.array([]), 'dyl_dx': np.array([]),
+        'max_gradient_aft': 0.0,
+        'no_intersection': False, 'thickness_in_range': False,
+        'single_maximum': False, 'gradients_ok': False,
+    }
+
     if coord is None or len(coord) < 3:
-        details = {'valid': False, 'thickness': np.array([]), 'x_common': np.array([]), 't_max': 0.0, 'x_t_max': 0.0}
-        return (False, details) if return_details else False
+        return (False, empty_details) if return_details else False
 
     coord = np.asarray(coord, dtype=float)
-    x = coord[:, 0]
-    y = coord[:, 1]
-
+    x, y = coord[:, 0], coord[:, 1]
     if np.any(~np.isfinite(x)) or np.any(~np.isfinite(y)):
-        details = {'valid': False, 'thickness': np.array([]), 'x_common': np.array([]), 't_max': 0.0, 'x_t_max': 0.0}
-        return (False, details) if return_details else False
+        return (False, empty_details) if return_details else False
 
+    # Split the surface into upper (suction) and lower (pressure) halves
+    # at the leading edge, each sorted from leading to trailing edge.
     le_idx = np.argmin(np.abs(x))
     lower = coord[:le_idx + 1]
     upper = coord[le_idx:]
     upper = upper[np.argsort(upper[:, 0])]
     lower = lower[np.argsort(lower[:, 0])]
 
+    # --- Thickness distribution, t(x) = y_upper(x) - y_lower(x) ---
     x_common = np.linspace(0.0, 1.0, 500)
-    upper_interp = interp1d(upper[:, 0], upper[:, 1], bounds_error=False, fill_value=np.nan)
-    lower_interp = interp1d(lower[:, 0], lower[:, 1], bounds_error=False, fill_value=np.nan)
-
-    y_upper = upper_interp(x_common)
-    y_lower = lower_interp(x_common)
+    y_upper = interp1d(upper[:, 0], upper[:, 1], bounds_error=False, fill_value=np.nan)(x_common)
+    y_lower = interp1d(lower[:, 0], lower[:, 1], bounds_error=False, fill_value=np.nan)(x_common)
     thickness = y_upper - y_lower
+    finite_thickness = bool(np.isfinite(thickness).all())
 
-    thickness = np.asarray(thickness, dtype=float)
-    valid = True
-    t_max_idx = int(np.nanargmax(thickness)) if thickness.size else -1
-    t_max = float(thickness[t_max_idx]) if thickness.size else 0.0
-    x_t_max = float(x_common[t_max_idx]) if thickness.size else 0.0
+    t_max_idx = int(np.nanargmax(thickness)) if finite_thickness else -1
+    t_max = float(thickness[t_max_idx]) if finite_thickness else 0.0
+    x_t_max = float(x_common[t_max_idx]) if finite_thickness else 0.0
 
-    if np.any(~np.isfinite(thickness)) or np.any(thickness < -0.001):
-        valid = False
-    if t_max < 0.04 or t_max > 0.25:
-        valid = False
-    if x_t_max < 0.1 or x_t_max > 0.6:
-        valid = False
+    # Criterion 1: no intersection -> t(x) >= 0 everywhere (a tiny negative
+    # tolerance is allowed to absorb interpolation/floating-point noise).
+    no_intersection = finite_thickness and bool(np.all(thickness >= -1e-6))
+
+    # Criterion 2: max thickness between 4% and 25% chord.
+    thickness_in_range = 0.04 <= t_max <= 0.25
+
+    # Criterion 3: the thickness distribution has a single maximum, i.e.
+    # dt/dx crosses zero exactly once strictly inside (0, 1).
+    dt_dx = np.gradient(thickness, x_common) if finite_thickness else np.array([])
+    interior = (x_common > 0.0) & (x_common < 1.0)
+    thickness_turning_points = []
+    dt_interior = dt_dx[interior]
+    x_interior = x_common[interior]
+    for i in range(len(dt_interior) - 1):
+        if dt_interior[i] == 0 or dt_interior[i] * dt_interior[i + 1] < 0:
+            thickness_turning_points.append(float(x_interior[i]))
+    single_maximum = finite_thickness and len(thickness_turning_points) == 1
+
+    # --- Surface gradients dy/dx, used for criterion 4 ---
+    x_grad = np.linspace(0.0, 1.0, 500)
+    y_upper_grad = np.interp(x_grad, upper[:, 0], upper[:, 1])
+    y_lower_grad = np.interp(x_grad, lower[:, 0], lower[:, 1])
+    dyu_dx = np.gradient(y_upper_grad, x_grad)
+    dyl_dx = np.gradient(y_lower_grad, x_grad)
+
+    # Criterion 4: gradients must not be too steep aft of x/c = 0.2.
+    aft = x_grad >= 0.2
+    max_gradient_aft = float(np.max(np.abs(np.concatenate([dyu_dx[aft], dyl_dx[aft]]))))
+    gradients_ok = max_gradient_aft <= 0.5
+
+    valid = no_intersection and thickness_in_range and single_maximum and gradients_ok
 
     details = {
         'valid': valid,
@@ -314,6 +355,17 @@ def validate_aerofoil(coord, return_details=False):
         'x_common': x_common,
         't_max': t_max,
         'x_t_max': x_t_max,
+        'dt_dx': dt_dx,
+        'n_thickness_turning_points': len(thickness_turning_points),
+        'thickness_turning_points': thickness_turning_points,
+        'x_grad': x_grad,
+        'dyu_dx': dyu_dx,
+        'dyl_dx': dyl_dx,
+        'max_gradient_aft': max_gradient_aft,
+        'no_intersection': no_intersection,
+        'thickness_in_range': thickness_in_range,
+        'single_maximum': single_maximum,
+        'gradients_ok': gradients_ok,
     }
     return (valid, details) if return_details else valid
 
@@ -376,15 +428,16 @@ def parsec_params_to_coords(parsec_params, npts=241, xte=1.0, yte=0.0):
 def plot_aerofoil_diagnostics(parsec_params, npts=241, show=False, save_path=None):
     """
     Generate an aerofoil from a set of PARSEC parameters and plot a set of
-    diagnostic figures that make it easy to check the shape is sensible:
+    diagnostic figures, one per validity criterion, so it's easy to see
+    exactly why an aerofoil passed or failed:
 
         1. The aerofoil contour (upper + lower surface).
-        2. The thickness distribution (t/c vs x/c), with the maximum
-           thickness point marked.
-        3. The gradient of the thickness distribution, with zero-crossings
-           marked (these are local maxima/minima in thickness).
-        4. The upper and lower surface gradients (dy/dx), useful for
-           spotting kinks or overly sharp leading/trailing edges.
+        2. The thickness distribution (t/c vs x/c) — criteria 1 & 2:
+           t(x) >= 0 everywhere, and 0.04 <= max(t) <= 0.25.
+        3. The gradient of the thickness distribution — criterion 3: dt/dx
+           should cross zero exactly once (a single maximum), marked here.
+        4. The upper/lower surface gradients (dy/dx) — criterion 4:
+           |dy/dx| <= 0.5 aft of x/c = 0.2.
 
     Parameters:
         parsec_params (dict): PARSEC parameters, see parsec_params_to_coords.
@@ -405,33 +458,17 @@ def plot_aerofoil_diagnostics(parsec_params, npts=241, show=False, save_path=Non
     x, y = coords[:, 0], coords[:, 1]
     x_common = details['x_common']
     thickness = details['thickness']
+    dt_dx = details['dt_dx']
+    turning_points = details['thickness_turning_points']
+    x_grad = details['x_grad']
 
-    # --- Thickness derivatives, used to find the point of max thickness
-    # and any other local turning points in the thickness profile. ---
-    dt_dx = np.gradient(thickness, x_common)
-    zero_crossings = [
-        x_common[i] for i in range(len(dt_dx) - 1)
-        if dt_dx[i] == 0 or dt_dx[i] * dt_dx[i + 1] < 0
-    ]
-    i_max_thickness = np.argmax(thickness)
-    max_thickness_x = x_common[i_max_thickness]
-    max_thickness_y = thickness[i_max_thickness]
-
-    # --- Split the surface into upper/lower halves (sorted leading edge to
-    # trailing edge) so we can look at each surface's gradient separately. ---
-    i_le = np.argmin(coords[:, 0])
-    upper = coords[:i_le + 1]
-    lower = coords[i_le:]
-    upper = upper[np.argsort(upper[:, 0])]
-    lower = lower[np.argsort(lower[:, 0])]
-
-    x_grad = np.linspace(0.001, 1.0, 500)
-    y_upper = np.interp(x_grad, upper[:, 0], upper[:, 1])
-    y_lower = np.interp(x_grad, lower[:, 0], lower[:, 1])
-
+    # Clip the displayed gradients to a sensible y-axis range; the actual
+    # pass/fail threshold (0.5) is drawn as a horizontal line regardless.
     grad_limit = 2.0
-    dyu_dx = np.clip(np.gradient(y_upper, x_grad), -grad_limit, grad_limit)
-    dyl_dx = np.clip(np.gradient(y_lower, x_grad), -grad_limit, grad_limit)
+    dyu_dx_plot = np.clip(details['dyu_dx'], -grad_limit, grad_limit)
+    dyl_dx_plot = np.clip(details['dyl_dx'], -grad_limit, grad_limit)
+
+    t_max_idx = np.argmax(thickness)
 
     # --- Plotting ---
     fig, axes = plt.subplots(
@@ -449,37 +486,36 @@ def plot_aerofoil_diagnostics(parsec_params, npts=241, show=False, save_path=Non
     axes[0].set_ylim(-0.1, 0.2)
     axes[0].grid(True, alpha=0.3)
 
-    # 2. Thickness distribution, with the allowed range and max point marked
+    # 2. Thickness distribution — criteria 1 (t(x) >= 0) & 2 (0.04-0.25 max)
     axes[1].plot(x_common, thickness, linewidth=2, color='tab:orange')
+    axes[1].axhline(0.0, color='tab:red', linestyle='--', linewidth=0.8, alpha=0.7)
     axes[1].axhline(0.25, color='black', linestyle='--', linewidth=0.8)
     axes[1].axhline(0.04, color='black', linestyle='--', linewidth=0.8)
-    axes[1].axvline(0.1, color='red', linestyle='--', linewidth=0.8, alpha=0.5)
-    axes[1].axvline(0.6, color='red', linestyle='--', linewidth=0.8, alpha=0.5)
-    axes[1].plot(max_thickness_x, max_thickness_y, 'x', color='tab:orange', markersize=8, markeredgewidth=3)
-    axes[1].annotate(f'{max_thickness_x:.2f}c', (max_thickness_x, max_thickness_y), xytext=(5, 8), textcoords='offset points')
-    axes[1].set_title('Thickness distribution')
+    axes[1].plot(x_common[t_max_idx], thickness[t_max_idx], 'x', color='tab:orange', markersize=8, markeredgewidth=3)
+    axes[1].annotate(f'{x_common[t_max_idx]:.2f}c', (x_common[t_max_idx], thickness[t_max_idx]), xytext=(5, 8), textcoords='offset points')
+    axes[1].set_title(f"Thickness distribution (max={details['t_max']:.3f} at x/c={details['x_t_max']:.2f})")
     axes[1].set_ylabel('t/c [-]')
     axes[1].set_ylim(-0.1, 0.3)
     axes[1].grid(True, alpha=0.3)
 
-    # 3. Gradient of thickness, with turning points marked
+    # 3. Gradient of thickness — criterion 3 (exactly one turning point)
     axes[2].plot(x_common, dt_dx, linewidth=2, color='tab:green')
     axes[2].axhline(0.0, color='black', linestyle='--', linewidth=0.8)
-    for xc in zero_crossings:
+    for xc in turning_points:
         axes[2].plot(xc, 0, 'x', color='tab:green', markersize=8, markeredgewidth=3)
         axes[2].annotate(f'{xc:.2f}c', (xc, 0), xytext=(5, 8), textcoords='offset points')
-    axes[2].set_title('Gradient of thickness')
+    axes[2].set_title(f'Gradient of thickness ({len(turning_points)} turning point(s), expect 1)')
     axes[2].set_ylabel('d(t/c)/d(x/c)')
     axes[2].set_ylim(-grad_limit, grad_limit)
     axes[2].grid(True, alpha=0.3)
 
-    # 4. Upper/lower surface gradients
-    axes[3].plot(x_grad, dyu_dx, linewidth=2, color='tab:purple', label='Upper surface')
-    axes[3].plot(x_grad, dyl_dx, linewidth=2, color='black', label='Lower surface')
+    # 4. Upper/lower surface gradients — criterion 4 (|dy/dx| <= 0.5 for x >= 0.2)
+    axes[3].plot(x_grad, dyu_dx_plot, linewidth=2, color='tab:purple', label='Upper surface')
+    axes[3].plot(x_grad, dyl_dx_plot, linewidth=2, color='black', label='Lower surface')
     axes[3].axhline(-0.5, color='black', linestyle='--', linewidth=0.8)
     axes[3].axhline(0.5, color='black', linestyle='--', linewidth=0.8)
     axes[3].axvline(0.2, color='red', linestyle='--', linewidth=0.8, alpha=0.5)
-    axes[3].set_title('Upper and lower surface gradients')
+    axes[3].set_title(f"Surface gradients (max |dy/dx| aft of x/c=0.2 is {details['max_gradient_aft']:.3f})")
     axes[3].set_ylabel('dy/dx')
     axes[3].set_xlabel('x/c [-]')
     axes[3].set_ylim(-grad_limit, grad_limit)

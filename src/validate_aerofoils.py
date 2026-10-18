@@ -22,7 +22,7 @@ each parameter).
 import os
 
 from paths import get_path
-from parsecairfoils import plot_aerofoil_diagnostics
+from parsecairfoils import plot_aerofoil_diagnostics, _validation_reasons
 
 
 # Each entry is a (name, parsec_params) pair. The default entry here
@@ -70,6 +70,9 @@ def validate_aerofoils(aerofoils_to_check=AEROFOILS_TO_CHECK, show=False):
 
         status = "PASSED" if details['valid'] else "FAILED"
         print(f"[{status}] {name}: max thickness {details['t_max']:.4f} at x/c={details['x_t_max']:.4f}")
+        if not details['valid']:
+            for reason in _validation_reasons(details):
+                print(f"    - {reason}")
 
     return results
 
